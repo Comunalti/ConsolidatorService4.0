@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<ProcessingRules
+        version="1.0"
+        WORKER_CONCURRENCY="20"
+        RABBIT_HOST="localhost"
+        RABBIT_PORT="5672"
+        RABBIT_USER="guest"
+        RABBIT_PASS="guest"
+
+>
+
+  <!-- =================================================================== -->
+  <!-- ROUTING PHASE — decide quais redes devem rodar                      -->
+  <!-- =================================================================== -->
+  <initialProcesses>
+
+  </initialProcesses>
+  <routings
+          RABBIT_URL="amqp://guest:guest@localhost:5672/"
+          NETWORK_QUEUE_PREFIX="fila_"
+          RABBIT_PREFETCH="20"
+          RABBIT_MAIN_QUEUE="yolo.out.queue"
+          RABBIT_ENTRY_QUEUE="consolidator.in.queue"
+  >
+
+    <!-- Blur Pessoas -->
+    <routing network_name="blur_Pessoas" description="Aplicar blur em pessoas">
+      <conditions>
+        <NotProcessedInNetwork network_name="blur_Pessoas"/>
+      </conditions>
+    </routing>
+
+    <!-- Blur Placas -->
+    <routing network_name="blur_Placas" description="Aplicar blur em placas">
+      <conditions>
+        <NotProcessedInNetwork network_name="blur_Placas"/>
+      </conditions>
+    </routing>
+
+    <!-- Rede Mãe -->
+    <routing network_name="RedeMae" description="Processar rede mãe após blur">
+      <conditions>
+        <ProcessingFinishedInNetwork network_name="blur_Pessoas"/>
+        <ProcessingFinishedInNetwork network_name="blur_Placas"/>
+        <NotProcessedInNetwork network_name="RedeMae"/>
+      </conditions>
+    </routing>
+
+    <!-- Poluição na Via -->
+    <routing network_name="micro_rede_PoluicaoNaVia" description="Processar poluição via">
+      <conditions>
+        <ProcessingFinishedInNetwork network_name="blur_Pessoas"/>
+        <ProcessingFinishedInNetwork network_name="blur_Placas"/>
+        <NotProcessedInNetwork network_name="micro_rede_PoluicaoNaVia"/>
+      </conditions>
+    </routing>
+
+    <!-- Árvores / Elementos de Poste -->
+    <routing network_name="micro_rede_ArvoreElementosDePoste"
+             description="Processar árvore e elementos de poste">
+      <conditions>
+        <ProcessingFinishedInNetwork network_name="RedeMae"/>
+        <NotProcessedInNetwork network_name="micro_rede_ArvoreElementosDePoste"/>
+        <or>
+          <CityIsIbge code="1302603"/>
+          <CityIsIbge code="2606408"/>
+          <CityIsIbge code="3103504"/>
+          <CityIsIbge code="3106200"/>
+          <CityIsIbge code="3548807"/>
+          <CityIsIbge code="3550308"/>
+          <CityIsIbge code="4314902"/>
+        </or>
+      </conditions>
+    </routing>
+
+    <!-- Background -->
+    <routing network_name="micro_rede_Background" description="Processar elementos de background">
+      <conditions>
+        <ProcessingFinishedInNetwork network_name="RedeMae"/>
+        <NotProcessedInNetwork network_name="micro_rede_Background"/>
+        <RequiresDetectionOfClass class_id="25"/>
+      </conditions>
+    </routing>
+
+    <!-- Fissuras Tipos -->
+    <routing network_name="micro_rede_FissurasTipos"
+             description="Classificar tipos de fissuras">
+      <conditions>
+        <ProcessingFinishedInNetwork network_name="micro_rede_Background"/>
+        <NotProcessedInNetwork network_name="micro_rede_FissurasTipos"/>
+        <RequiresDetectionOfClass class_id="25"/>
+      </conditions>
+    </routing>
+
+  </routings>
+
+
+  <!-- =================================================================== -->
+  <!-- DETECTIONS RULES — Decide tasks                                     -->
+  <!-- =================================================================== -->
+
+  <DetectionsRules SGC_API_URL="http://10.15.12.55:8880" SGC_HTTP_TIMEOUT_S="30">
+
+    <!-- Deteções com class_id = 2 -->
+    <DetectionRule target_task="TesteConsolidator">
+      <conditions>
+        <DetectionIs class_id="2"/>
+      </conditions>
+    </DetectionRule>
+
+    <!-- Deteções com class_id = 7 -->
+    <DetectionRule target_task="TesteConsolidator">
+      <conditions>
+        <DetectionIs class_id="7"/>
+      </conditions>
+    </DetectionRule>
+
+    <!-- Deteções com class_id = 9 -->
+    <DetectionRule target_task="TesteConsolidator">
+      <conditions>
+        <DetectionIs class_id="9"/>
+      </conditions>
+    </DetectionRule>
+
+  </DetectionsRules>
+
+  <!-- =================================================================== -->
+  <!-- FINAL DATABASE RULES — Decide quais detecções vão para o DB final   -->
+  <!-- =================================================================== -->
+
+  <FinalDatabaseRules>
+    <FinalDatabaseDetectionConditions host="localhost" port="5432" username="local_admin" password="local_test" Database="PostgreDB" Schema="ia_zeladoria">
+      <!-- Exemplo: todas as detecções que NÃO forem class_id 2 e 7 -->
+      <DetectionIsNot class_id="555550"/>
+      <DetectionIsNot class_id="555551"/>
+      <DetectionIsNot class_id="555552"/>
+      <DetectionIsNot class_id="888880"/>
+      <DetectionIsNot class_id="888881"/>
+      <DetectionIsNot class_id="888882"/>
+      <DetectionIsNot class_id="888883"/>
+      <DetectionIsNot class_id="888884"/>
+      <DetectionIsNot class_id="888885"/>
+      
+    </FinalDatabaseDetectionConditions>
+  </FinalDatabaseRules>
+
+</ProcessingRules>
+
+
+
+
+
