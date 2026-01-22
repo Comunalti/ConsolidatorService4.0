@@ -2,26 +2,28 @@
 
 <ProcessingRules
         version="1.0"
+
         WORKER_CONCURRENCY="20"
         RABBIT_HOST="localhost"
         RABBIT_PORT="5672"
         RABBIT_USER="guest"
         RABBIT_PASS="guest"
 
+        RABBIT_MAIN_QUEUE="yolo.out.queue"
+        RABBIT_ENTRY_QUEUE="consolidator.in.queue"
+
+
+        POSTGRES_HOST="localhost"
+        POSTGRES_PORT="5432"
+        POSTGRES_USER="local_admin"
+        POSTGRES_PASS="local_test"
+        POSTGRES_DATABASE="PostgreDB"
+
+        POSTGRES_CONSOLIDATOR_SCHEMA=""
 >
 
-  <!-- =================================================================== -->
-  <!-- ROUTING PHASE — decide quais redes devem rodar                      -->
-  <!-- =================================================================== -->
-  <initialProcesses>
-
-  </initialProcesses>
   <routings
-          RABBIT_URL="amqp://guest:guest@localhost:5672/"
           NETWORK_QUEUE_PREFIX="fila_"
-          RABBIT_PREFETCH="20"
-          RABBIT_MAIN_QUEUE="yolo.out.queue"
-          RABBIT_ENTRY_QUEUE="consolidator.in.queue"
   >
 
     <!-- Blur Pessoas -->
@@ -130,7 +132,7 @@
   <!-- =================================================================== -->
 
   <FinalDatabaseRules>
-    <FinalDatabaseDetectionConditions host="localhost" port="5432" username="local_admin" password="local_test" Database="PostgreDB" Schema="ia_zeladoria">
+    <FinalDatabaseDetectionConditions Schema="ia_zeladoria">
       <!-- Exemplo: todas as detecções que NÃO forem class_id 2 e 7 -->
       <DetectionIsNot class_id="555550"/>
       <DetectionIsNot class_id="555551"/>

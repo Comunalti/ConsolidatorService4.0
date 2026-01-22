@@ -1,51 +1,28 @@
+# xml_parser.py
 from __future__ import annotations
+
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional, Type, TypeVar, ClassVar, Union, Any
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel, Field
 
+from ia_zeladoria_repository import (
+    ImageContextModel,
+    ImageDataModel,
+    DetectionModel,
+    JobModel,
+)
+
 # ================================================================
-# IMAGE CONTEXT MODELS
+# Helpers
 # ================================================================
 
-class ImageData(BaseModel):
-    image_id: int
-    image_path: Optional[str] = None
-    ibge_code: Optional[int] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    created_at: Optional[datetime] = None
-    inserted_at: datetime
-
-
-class Detection(BaseModel):
-    detection_id: int
-    image_id: int
-    global_class_id: Optional[int] = None
-    network_name: Optional[str] = None
-    confidence: Optional[float] = None
-    x: Optional[float] = None
-    y: Optional[float] = None
-    width: Optional[float] = None
-    height: Optional[float] = None
-    mask: Optional[Any] = None
-    created_at: datetime
-
-
-class NetworkStatus(BaseModel):
-    net_status_id: int
-    image_id: int
-    network_name: Optional[str] = None
-    net_status: str
-    updated_at: datetime
-
-
-class ImageContext(BaseModel):
-    image: Optional[ImageData] = None
-    detections: List[Detection] = Field(default_factory=list)
-    network_status: List[NetworkStatus] = Field(default_factory=list)
+def iter_detections(ctx: ImageContextModel) -> Iterator[DetectionModel]:
+    for job in ctx.jobs:
+        for det in job.detections:
+            yield det
 
 
 # ================================================================
@@ -54,10 +31,11 @@ class ImageContext(BaseModel):
 
 TRoutingCond = TypeVar("TRoutingCond", bound="RoutingCondition")
 
+
 class RoutingCondition(BaseModel):
     """
     Base para condições usadas pelas regras de roteamento de redes.
-    Avalia apenas com base no ImageContext.
+    Avalia apenas com base no ImageContextModel.
     """
     model_config = {"arbitrary_types_allowed": True}
 
@@ -78,7 +56,7 @@ class RoutingCondition(BaseModel):
             raise ValueError(f"RoutingCondition XML desconhecida: <{tag}>")
         return cls._registry[tag].from_xml(node)  # type: ignore
 
-    def evaluate(self, ctx: ImageContext) -> bool:
+    def evaluate(self, ctx: ImageContextModel) -> bool:
         raise NotImplementedError()
 
 
@@ -90,10 +68,11 @@ class RC_NotProcessedInNetwork(RoutingCondition):
     def from_xml(cls, node: ET.Element):
         return cls(network_name=node.attrib["network_name"])
 
-    def evaluate(self, ctx: ImageContext) -> bool:
+    def evaluate(self, ctx: ImageContextModel) -> bool:
+        # "não processado" = não existe job daquela rede em processing|finished
         return not any(
-            ns.network_name == self.network_name and ns.net_status in ("pending", "done")
-            for ns in ctx.network_status
+            j.network_name == self.network_name and j.status in ("processing", "finished")
+            for j in ctx.jobs
         )
 
 
@@ -105,10 +84,10 @@ class RC_ProcessingFinishedInNetwork(RoutingCondition):
     def from_xml(cls, node: ET.Element):
         return cls(network_name=node.attrib["network_name"])
 
-    def evaluate(self, ctx: ImageContext) -> bool:
+    def evaluate(self, ctx: ImageContextModel) -> bool:
         return any(
-            ns.network_name == self.network_name and ns.net_status == "done"
-            for ns in ctx.network_status
+            j.network_name == self.network_name and j.status == "finished"
+            for j in ctx.jobs
         )
 
 
@@ -120,8 +99,8 @@ class RC_RequiresDetectionOfClass(RoutingCondition):
     def from_xml(cls, node: ET.Element):
         return cls(class_id=int(node.attrib["class_id"]))
 
-    def evaluate(self, ctx: ImageContext) -> bool:
-        return any(det.global_class_id == self.class_id for det in ctx.detections)
+    def evaluate(self, ctx: ImageContextModel) -> bool:
+        return any(det.global_class_id == self.class_id for det in iter_detections(ctx))
 
 
 @RoutingCondition.register_xml_tag("CityIsIbge")
@@ -132,8 +111,17 @@ class RC_CityIsIbge(RoutingCondition):
     def from_xml(cls, node: ET.Element):
         return cls(code=int(node.attrib["code"]))
 
-    def evaluate(self, ctx: ImageContext) -> bool:
-        return ctx.image is not None and ctx.image.ibge_code == self.code
+    def evaluate(self, ctx: ImageContextModel) -> bool:
+        # No schema novo, ibge_code pode estar em tags (ou você pode ter coluna dedicada no futuro).
+        # Aqui seguimos o comportamento antigo: tenta pegar do ctx.image.tags["ibge_code"].
+        if not ctx.image:
+            return False
+        if ctx.image.tags and "ibge_code" in ctx.image.tags:
+            try:
+                return int(ctx.image.tags["ibge_code"]) == self.code
+            except Exception:
+                return False
+        return False
 
 
 @RoutingCondition.register_xml_tag("or")
@@ -145,7 +133,7 @@ class RC_Or(RoutingCondition):
         sub = [RoutingCondition.from_xml_node(c) for c in node]
         return cls(conditions=sub)
 
-    def evaluate(self, ctx: ImageContext) -> bool:
+    def evaluate(self, ctx: ImageContextModel) -> bool:
         return any(c.evaluate(ctx) for c in self.conditions)
 
 
@@ -155,10 +143,11 @@ class RC_Or(RoutingCondition):
 
 TDetCond = TypeVar("TDetCond", bound="DetectionCondition")
 
+
 class DetectionCondition(BaseModel):
     """
     Base para condições usadas pelas regras de detecção (DetectionsRules).
-    Avalia com base no ImageContext E na Detection.
+    Avalia com base no ImageContextModel E na DetectionModel.
     """
     model_config = {"arbitrary_types_allowed": True}
 
@@ -178,7 +167,7 @@ class DetectionCondition(BaseModel):
             raise ValueError(f"DetectionCondition XML desconhecida: <{tag}>")
         return cls._registry[tag].from_xml(node)  # type: ignore
 
-    def evaluate(self, ctx: ImageContext, det: Detection) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         raise NotImplementedError()
 
 
@@ -190,7 +179,7 @@ class DC_DetectionIs(DetectionCondition):
     def from_xml(cls, node: ET.Element):
         return cls(class_id=int(node.attrib["class_id"]))
 
-    def evaluate(self, ctx: ImageContext, det: Detection) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         return det.global_class_id == self.class_id
 
 
@@ -200,10 +189,11 @@ class DC_DetectionIs(DetectionCondition):
 
 TFDbCond = TypeVar("TFDbCond", bound="FinalDatabaseCondition")
 
+
 class FinalDatabaseCondition(BaseModel):
     """
     Base para condições da etapa FinalDatabaseRules.
-    Avalia cada Detection e decide se ela deve ir para o DB final.
+    Avalia cada DetectionModel e decide se ela deve ir para o DB final.
     """
     model_config = {"arbitrary_types_allowed": True}
 
@@ -223,7 +213,7 @@ class FinalDatabaseCondition(BaseModel):
             raise ValueError(f"FinalDatabaseCondition XML desconhecida: <{tag}>")
         return cls._registry[tag].from_xml(node)  # type: ignore
 
-    def evaluate(self, ctx: ImageContext, det: Detection) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         raise NotImplementedError()
 
 
@@ -239,7 +229,7 @@ class FDB_DetectionIsNot(FinalDatabaseCondition):
     def from_xml(cls, node: ET.Element):
         return cls(class_id=int(node.attrib["class_id"]))
 
-    def evaluate(self, ctx: ImageContext, det: Detection) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         return det.global_class_id != self.class_id
 
 
@@ -256,35 +246,25 @@ class FDB_Or(FinalDatabaseCondition):
         sub = [FinalDatabaseCondition.from_xml_node(c) for c in node]
         return cls(conditions=sub)
 
-    def evaluate(self, ctx: ImageContext, det: Detection) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         return any(c.evaluate(ctx, det) for c in self.conditions)
+
 
 class FinalDatabaseDetectionConditions(BaseModel):
     """
-    Bloco <FinalDatabaseDetectionConditions Database="..." Schema="...">
-    Agrupa as FinalDatabaseConditions e guarda o nome do database e schema finais.
+    Bloco <FinalDatabaseDetectionConditions Schema="...">
+    No XML novo, Database não existe aqui (assumimos database do root).
     """
-    database: str
     schema: Optional[str] = None
     conditions: List[FinalDatabaseCondition] = Field(default_factory=list)
 
     @classmethod
     def from_xml(cls, node: ET.Element):
-        db_name = node.attrib.get("Database")
-        if not db_name:
-            raise ValueError("<FinalDatabaseDetectionConditions> requer atributo Database")
-
         schema_name = node.attrib.get("Schema")  # opcional
-
         conds: List[FinalDatabaseCondition] = []
         for child in node:
             conds.append(FinalDatabaseCondition.from_xml_node(child))
-
-        return cls(
-            database=db_name,
-            schema=schema_name,
-            conditions=conds,
-        )
+        return cls(schema=schema_name, conditions=conds)
 
 
 # ================================================================
@@ -300,16 +280,16 @@ class RoutingRule(BaseModel):
     def from_xml(cls, node: ET.Element):
         network = node.attrib["network_name"]
         desc = node.attrib.get("description")
-        conds = []
+        conds: List[RoutingCondition] = []
 
         conds_elem = node.find("conditions")
-        if conds_elem:
+        if conds_elem is not None:
             for c in conds_elem:
                 conds.append(RoutingCondition.from_xml_node(c))
 
         return cls(network_name=network, description=desc, conditions=conds)
 
-    def matches(self, ctx: ImageContext) -> bool:
+    def matches(self, ctx: ImageContextModel) -> bool:
         return all(c.evaluate(ctx) for c in self.conditions)
 
 
@@ -324,16 +304,16 @@ class DetectionRule(BaseModel):
     @classmethod
     def from_xml(cls, node: ET.Element):
         task = node.attrib["target_task"]
-        conds = []
+        conds: List[DetectionCondition] = []
 
         conds_elem = node.find("conditions")
-        if conds_elem:
+        if conds_elem is not None:
             for c in conds_elem:
                 conds.append(DetectionCondition.from_xml_node(c))
 
         return cls(target_task=task, conditions=conds)
 
-    def matches(self, ctx: ImageContext, det: Detection) -> bool:
+    def matches(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
         return all(c.evaluate(ctx, det) for c in self.conditions)
 
 
@@ -342,7 +322,7 @@ class DetectionRule(BaseModel):
 # ================================================================
 
 class FinalDetectionRoute(BaseModel):
-    detection: Detection
+    detection: DetectionModel
     target_tasks: List[str] = Field(default_factory=list)
 
     def get_first(self) -> Optional[str]:
@@ -352,8 +332,6 @@ class FinalDetectionRoute(BaseModel):
         return self.target_tasks[-1] if self.target_tasks else None
 
     def get_by_priority(self, priority_index: int) -> Optional[str]:
-        # if 0 <= priority_index < len(self.target_tasks):
-        #     return self.target_tasks[priority_index]
         raise NotImplementedError("priority system not implemented")
 
 
@@ -364,14 +342,45 @@ class FinalDetectionRoute(BaseModel):
 class FinalDatabaseRoute(BaseModel):
     """
     Representa o resultado final para um database específico:
-    - database: nome do banco (ex: 'renan')
-    - schema: schema destino (ex: 'consolidator'), opcional
-    - detections: lista de detecções que devem ser enviadas para esse banco/schema
+    - database: nome do banco (do root POSTGRES_DATABASE)
+    - schema: schema destino (do bloco Schema="...")
+    - detections: lista de detecções
     """
     database: str
     schema: Optional[str] = None
-    detections: List[Detection] = Field(default_factory=list)
+    detections: List[DetectionModel] = Field(default_factory=list)
 
+
+# ================================================================
+# CONFIG DO XML (NOVO FORMATO)
+# ================================================================
+
+class RabbitConfig(BaseModel):
+    worker_concurrency: int
+    rabbit_host: str
+    rabbit_port: int
+    rabbit_user: str
+    rabbit_pass: str
+    rabbit_main_queue: str
+    rabbit_entry_queue: str
+
+
+class PostgresConfig(BaseModel):
+    postgres_host: str
+    postgres_port: int
+    postgres_user: str
+    postgres_pass: str
+    postgres_database: str
+    postgres_consolidator_schema: Optional[str] = None
+
+
+class RoutingsConfig(BaseModel):
+    network_queue_prefix: str = "fila_"
+
+
+class SgcConfig(BaseModel):
+    sgc_api_url: str
+    sgc_http_timeout_s: int = 30
 
 
 # ================================================================
@@ -380,101 +389,155 @@ class FinalDatabaseRoute(BaseModel):
 
 class ProcessingRules(BaseModel):
     xml_path: Path
-    version: Optional[str]
-    routings: List[RoutingRule]
-    detection_rules: List[DetectionRule]
-    final_database_detection_conditions: List[FinalDatabaseDetectionConditions]
+    version: Optional[str] = None
+
+    rabbit: RabbitConfig
+    postgres: PostgresConfig
+
+    routings_config: RoutingsConfig
+    routings: List[RoutingRule] = Field(default_factory=list)
+
+    sgc: Optional[SgcConfig] = None
+    detection_rules: List[DetectionRule] = Field(default_factory=list)
+
+    final_database_detection_conditions: List[FinalDatabaseDetectionConditions] = Field(default_factory=list)
 
     model_config = {"arbitrary_types_allowed": True}
 
     def __init__(__self__, xml_path: Union[str, Path]):
         xml_path = Path(xml_path)
-        (
-            version,
-            routings,
-            detection_rules,
-            final_db_blocks,
-        ) = __self__._load(xml_path)
+        data = __self__._load(xml_path)
 
         super().__init__(
             xml_path=xml_path,
-            version=version,
-            routings=routings,
-            detection_rules=detection_rules,
-            final_database_detection_conditions=final_db_blocks,
+            version=data["version"],
+            rabbit=data["rabbit"],
+            postgres=data["postgres"],
+            routings_config=data["routings_config"],
+            routings=data["routings"],
+            sgc=data["sgc"],
+            detection_rules=data["detection_rules"],
+            final_database_detection_conditions=data["final_db_blocks"],
         )
 
     @staticmethod
-    def _load(path: Path):
+    def _req_attr(node: ET.Element, name: str) -> str:
+        v = node.attrib.get(name)
+        if v is None or v == "":
+            raise ValueError(f"XML requer atributo '{name}' em <{node.tag}>")
+        return v
+
+    @staticmethod
+    def _opt_attr(node: ET.Element, name: str, default: Optional[str] = None) -> Optional[str]:
+        v = node.attrib.get(name)
+        if v is None or v == "":
+            return default
+        return v
+
+    @staticmethod
+    def _load(path: Path) -> Dict[str, Any]:
         tree = ET.parse(path)
         root = tree.getroot()
 
+        if root.tag != "ProcessingRules":
+            raise ValueError(f"Root inválido: esperado <ProcessingRules>, veio <{root.tag}>")
+
         version = root.attrib.get("version")
 
-        # Routing rules
-        rrules: List[RoutingRule] = []
-        relem = root.find("routings")
-        if relem:
-            for r in relem.findall("routing"):
-                rrules.append(RoutingRule.from_xml(r))
+        rabbit = RabbitConfig(
+            worker_concurrency=int(ProcessingRules._req_attr(root, "WORKER_CONCURRENCY")),
+            rabbit_host=ProcessingRules._req_attr(root, "RABBIT_HOST"),
+            rabbit_port=int(ProcessingRules._req_attr(root, "RABBIT_PORT")),
+            rabbit_user=ProcessingRules._req_attr(root, "RABBIT_USER"),
+            rabbit_pass=ProcessingRules._req_attr(root, "RABBIT_PASS"),
+            rabbit_main_queue=ProcessingRules._req_attr(root, "RABBIT_MAIN_QUEUE"),
+            rabbit_entry_queue=ProcessingRules._req_attr(root, "RABBIT_ENTRY_QUEUE"),
+        )
 
-        # Detection rules
-        drules: List[DetectionRule] = []
-        delem = root.find("DetectionsRules")
-        if delem:
-            for d in delem.findall("DetectionRule"):
-                drules.append(DetectionRule.from_xml(d))
+        postgres = PostgresConfig(
+            postgres_host=ProcessingRules._req_attr(root, "POSTGRES_HOST"),
+            postgres_port=int(ProcessingRules._req_attr(root, "POSTGRES_PORT")),
+            postgres_user=ProcessingRules._req_attr(root, "POSTGRES_USER"),
+            postgres_pass=ProcessingRules._req_attr(root, "POSTGRES_PASS"),
+            postgres_database=ProcessingRules._req_attr(root, "POSTGRES_DATABASE"),
+            postgres_consolidator_schema=ProcessingRules._opt_attr(root, "POSTGRES_CONSOLIDATOR_SCHEMA", None),
+        )
 
-        # Final database detection conditions (podem existir vários blocos)
+        routings_config = RoutingsConfig(network_queue_prefix="fila_")
+        routings: List[RoutingRule] = []
+        routings_elem = root.find("routings")
+        if routings_elem is not None:
+            routings_config = RoutingsConfig(
+                network_queue_prefix=ProcessingRules._opt_attr(routings_elem, "NETWORK_QUEUE_PREFIX", "fila_") or "fila_"
+            )
+            for r in routings_elem.findall("routing"):
+                routings.append(RoutingRule.from_xml(r))
+
+        sgc: Optional[SgcConfig] = None
+        detection_rules: List[DetectionRule] = []
+        det_rules_elem = root.find("DetectionsRules")
+        if det_rules_elem is not None:
+            sgc = SgcConfig(
+                sgc_api_url=ProcessingRules._req_attr(det_rules_elem, "SGC_API_URL"),
+                sgc_http_timeout_s=int(ProcessingRules._opt_attr(det_rules_elem, "SGC_HTTP_TIMEOUT_S", "30") or "30"),
+            )
+            for d in det_rules_elem.findall("DetectionRule"):
+                detection_rules.append(DetectionRule.from_xml(d))
+
         final_db_blocks: List[FinalDatabaseDetectionConditions] = []
-        felem = root.find("FinalDatabaseRules")
-        if felem is not None:
-            for conds_elem in felem.findall("FinalDatabaseDetectionConditions"):
-                final_db_blocks.append(FinalDatabaseDetectionConditions.from_xml(conds_elem))
+        final_elem = root.find("FinalDatabaseRules")
+        if final_elem is not None:
+            for block in final_elem.findall("FinalDatabaseDetectionConditions"):
+                final_db_blocks.append(FinalDatabaseDetectionConditions.from_xml(block))
 
-        return version, rrules, drules, final_db_blocks
+        return {
+            "version": version,
+            "rabbit": rabbit,
+            "postgres": postgres,
+            "routings_config": routings_config,
+            "routings": routings,
+            "sgc": sgc,
+            "detection_rules": detection_rules,
+            "final_db_blocks": final_db_blocks,
+        }
 
     # -------------------------------------------------------------
     # ROUTING (REDES)
     # -------------------------------------------------------------
-    def get_next_network_routes(self, ctx: ImageContext) -> List[str]:
+    def get_next_network_routes(self, ctx: ImageContextModel = None) -> List[str]:
         """
-        Retorna a lista de redes que ainda devem ser processadas
-        com base nas regras de roteamento e no estado atual do contexto.
+        Retorna a lista de redes que ainda devem ser processadas.
         """
+        ctx = ctx or ImageContextModel.get_empty_context()
+
         return [r.network_name for r in self.routings if r.matches(ctx)]
 
     # -------------------------------------------------------------
     # DETECTION ROUTING (tasks)
     # -------------------------------------------------------------
-    def get_final_detections_routes(self, ctx: ImageContext) -> List[FinalDetectionRoute]:
+    def get_final_detections_routes(self, ctx: ImageContextModel) -> List[FinalDetectionRoute]:
         """
-        Retorna uma lista pura de FinalDetectionRoute,
-        uma para cada detecção, contendo as target_tasks aplicáveis.
+        Uma rota por detecção (todas as detecções de todos os jobs),
+        contendo as target_tasks aplicáveis.
         """
-        finalDetectionsRoutesMap: List[FinalDetectionRoute] = []
+        final_routes: List[FinalDetectionRoute] = []
 
-        for det in ctx.detections:
+        for det in iter_detections(ctx):
             tasks: List[str] = []
             for rule in self.detection_rules:
                 if rule.matches(ctx, det):
                     tasks.append(rule.target_task)
 
-            finalDetectionsRoutesMap.append(
-                FinalDetectionRoute(
-                    detection=det,
-                    target_tasks=tasks,
-                )
-            )
+            final_routes.append(FinalDetectionRoute(detection=det, target_tasks=tasks))
 
-        return finalDetectionsRoutesMap
+        return final_routes
 
     # -------------------------------------------------------------
     # FINAL DATABASE (map por database)
     # -------------------------------------------------------------
     def get_final_database_detections_map(
         self,
-        ctx: ImageContext,
+        ctx: ImageContextModel,
         finalDetectionsRouteMap: List[FinalDetectionRoute],
     ) -> List[FinalDatabaseRoute]:
         """
@@ -487,34 +550,30 @@ class ProcessingRules(BaseModel):
         if not self.final_database_detection_conditions:
             return []
 
-        candidate_detections: List[Detection] = [
+        candidate_detections: List[DetectionModel] = [
             route.detection
             for route in finalDetectionsRouteMap
             if not route.target_tasks
         ]
-
         if not candidate_detections:
             return []
 
         db_routes: List[FinalDatabaseRoute] = []
+        database_name = self.postgres.postgres_database  # vem do root no XML novo
 
         for db_block in self.final_database_detection_conditions:
             if not db_block.conditions:
                 db_dets = candidate_detections.copy()
             else:
-                db_dets: List[Detection] = []
-                for det in candidate_detections:
-                    if all(cond.evaluate(ctx, det) for cond in db_block.conditions):
-                        db_dets.append(det)
+                db_dets = [det for det in candidate_detections if all(cond.evaluate(ctx, det) for cond in db_block.conditions)]
 
             if db_dets:
                 db_routes.append(
                     FinalDatabaseRoute(
-                        database=db_block.database,
-                        schema=db_block.schema,  # <<---- AQUI
+                        database=database_name,
+                        schema=db_block.schema,
                         detections=db_dets,
                     )
                 )
 
         return db_routes
-
