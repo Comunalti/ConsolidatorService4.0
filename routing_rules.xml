@@ -102,7 +102,7 @@
   <!-- DETECTIONS RULES — Decide tasks                                     -->
   <!-- =================================================================== -->
 
-  <DetectionsRules SGC_API_URL="http://10.15.12.55:8880" SGC_HTTP_TIMEOUT_S="30">
+  <DetectionsRules SGC_API_URL="http://10.15.12.55:8880/send_detection_to_task" SGC_HTTP_TIMEOUT_S="30">
 
     <!-- Deteções com class_id = 2 -->
     <DetectionRule target_task="TesteConsolidator">

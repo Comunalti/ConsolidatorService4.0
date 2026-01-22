@@ -346,8 +346,7 @@ class FinalDatabaseRoute(BaseModel):
     - schema: schema destino (do bloco Schema="...")
     - detections: lista de detecções
     """
-    database: str
-    schema: Optional[str] = None
+    schema: str
     detections: List[DetectionModel] = Field(default_factory=list)
 
 
@@ -535,7 +534,7 @@ class ProcessingRules(BaseModel):
     # -------------------------------------------------------------
     # FINAL DATABASE (map por database)
     # -------------------------------------------------------------
-    def get_final_database_detections_map(
+    def get_final_database_detections(
         self,
         ctx: ImageContextModel,
         finalDetectionsRouteMap: List[FinalDetectionRoute],
@@ -559,7 +558,6 @@ class ProcessingRules(BaseModel):
             return []
 
         db_routes: List[FinalDatabaseRoute] = []
-        database_name = self.postgres.postgres_database  # vem do root no XML novo
 
         for db_block in self.final_database_detection_conditions:
             if not db_block.conditions:
@@ -570,7 +568,6 @@ class ProcessingRules(BaseModel):
             if db_dets:
                 db_routes.append(
                     FinalDatabaseRoute(
-                        database=database_name,
                         schema=db_block.schema,
                         detections=db_dets,
                     )

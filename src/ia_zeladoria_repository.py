@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, ClassVar
 
 import asyncpg
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +29,7 @@ class DetectionModel(BaseModel):
     pass_detections_id: int
     job_id: int
     global_class_id: int
+    label:str
 
     confidence: Optional[float] = None
     x: float
@@ -43,6 +44,9 @@ class DetectionModel(BaseModel):
 
 class JobModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
+    FINISHED: ClassVar[str] = "finished"
+    PROCESSING: ClassVar[str] = "processing"
 
     job_id: int
     status: str
@@ -69,6 +73,12 @@ class ImageContextModel(BaseModel):
     @staticmethod
     def get_empty_context():
         return ImageContextModel()
+
+    def has_processing_jobs(self) -> bool:
+        for job in self.jobs:
+            if job.status == JobModel.PROCESSING:
+                return True
+        return False
 
 # ============================================================
 # Repository
@@ -272,13 +282,13 @@ class PostgresRepository:
                 if not row:
                     raise RuntimeError("Falha ao criar/obter job_id.")
                 return int(row["job_id"])
-
+    #todo: make this return image_id
     async def finish_job(
         self,
         *,
         job_id: int,
         finished_at: Optional[datetime] = None,
-    ) -> None:
+    ) -> int:
         s = self._schema
         finished_at = finished_at or datetime.now()
 
@@ -296,6 +306,10 @@ class PostgresRepository:
                 )
                 if res == "UPDATE 0":
                     raise LookupError(f"job_id={job_id} não existe em {s}.job")
+                return image_id
 
     async def create_image_data(self,*,image_url):
+        raise NotImplementedError()
+
+    async def insert_detection_in_final_database(self,*,detection,schema):
         raise NotImplementedError()

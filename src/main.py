@@ -89,7 +89,7 @@ async def process_final_routes_if_needed(
 
     # These rule calls look sync; keep them sync (fast), but we will parallelize the IO afterwards.
     final_routes = processing_rules.get_final_detections_routes(image_context)
-    final_db_map = processing_rules.get_final_database_detections_map(
+    final_db_map = processing_rules.get_final_database_detections(
         image_context,
         final_routes,
     )
