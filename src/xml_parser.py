@@ -255,7 +255,7 @@ class FinalDatabaseDetectionConditions(BaseModel):
     Bloco <FinalDatabaseDetectionConditions Schema="...">
     No XML novo, Database não existe aqui (assumimos database do root).
     """
-    schema: Optional[str] = None
+    Schema: Optional[str] = None
     conditions: List[FinalDatabaseCondition] = Field(default_factory=list)
 
     @classmethod
@@ -264,7 +264,7 @@ class FinalDatabaseDetectionConditions(BaseModel):
         conds: List[FinalDatabaseCondition] = []
         for child in node:
             conds.append(FinalDatabaseCondition.from_xml_node(child))
-        return cls(schema=schema_name, conditions=conds)
+        return cls(Schema=schema_name, conditions=conds)
 
 
 # ================================================================
@@ -346,7 +346,7 @@ class FinalDatabaseRoute(BaseModel):
     - schema: schema destino (do bloco Schema="...")
     - detections: lista de detecções
     """
-    schema: str
+    Schema: str
     detections: List[DetectionModel] = Field(default_factory=list)
 
 
@@ -568,7 +568,7 @@ class ProcessingRules(BaseModel):
             if db_dets:
                 db_routes.append(
                     FinalDatabaseRoute(
-                        schema=db_block.schema,
+                        Schema=db_block.Schema,
                         detections=db_dets,
                     )
                 )

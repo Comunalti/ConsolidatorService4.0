@@ -11,7 +11,7 @@ from src.messages import YoloInMessage, ConsolidatorEntryMessage, YoloOutMessage
 from src.xml_parser import ProcessingRules
 
 async def handle_main_message(
-        message: aio_pika.IncomingMessage,
+        message:  aio_pika.abc.AbstractIncomingMessage,
         pg_pool: asyncpg.Pool,
         connection: aio_pika.abc.AbstractRobustConnection,
         http_client: httpx.AsyncClient,
@@ -83,7 +83,7 @@ async def handle_main_message(
                     url = processing_rules.sgc.sgc_api_url
                     params = {
                         "target_task": final_detections_route.target_task,
-                        "image_path":image_context.image.image_url,
+                        "image_path":image_context.image.image_path,
                         "sender_name":final_detections_route.sender_name,
                     }
                     body = [
@@ -124,7 +124,7 @@ async def handle_main_message(
 
                     await postgres_repository.insert_detection_in_final_database(
                         detection=final_database_route.detection,
-                        schema=final_database_route.schema
+                        schema=final_database_route.Schema
                     )
 
                     logger.debug(f"[Database Renan] Sucesso: {response.status_code} - {url}")

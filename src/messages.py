@@ -35,7 +35,7 @@ class RabbitMessageModel(BaseModel):
         )
 
     @classmethod
-    def from_message(cls: Type[T], message: aio_pika.IncomingMessage) -> T:
+    def from_message(cls: Type[T], message:  aio_pika.abc.AbstractIncomingMessage) -> T:
         """
         Método estático/classe que lê uma IncomingMessage, valida o JSON
         e retorna a instância da classe correta.
@@ -59,21 +59,25 @@ class RabbitMessageModel(BaseModel):
 # ==============================================================================
 # Modelos de Dados
 # ==============================================================================
+class DetectionResult(BaseModel):
+    label: str
+    id: int
+    confidence: float
 
-class DetectionModel(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    pass_detections_id: int
-    job_id: int
-    class_id: int
-
-    confidence: Optional[float] = None
     x: float
     y: float
     width: float
     height: float
 
+    x_min: int
+    y_min: int
+    x_max: int
+    y_max: int
+
+    image_shape: List[int]  # [W, H]
     mask: Optional[Dict[str, Any]] = None
+
+
 
 
 # ==============================================================================
@@ -103,4 +107,4 @@ class YoloOutMessage(RabbitMessageModel):
     job_id: int
     started_at: datetime
     processed_at: datetime
-    detections: List[DetectionModel] = Field(default_factory=list)
+    detections: List[DetectionResult] = Field(default_factory=list)

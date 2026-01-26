@@ -17,9 +17,9 @@
         POSTGRES_PORT="5432"
         POSTGRES_USER="local_admin"
         POSTGRES_PASS="local_test"
-        POSTGRES_DATABASE="PostgreDB"
+        POSTGRES_DATABASE="postgres"
 
-        POSTGRES_CONSOLIDATOR_SCHEMA=""
+        POSTGRES_CONSOLIDATOR_SCHEMA="consolidator"
 >
 
   <routings

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, ClassVar
 
 import asyncpg
 from pydantic import BaseModel, ConfigDict, Field
+import json
 
 
 # ============================================================
@@ -16,12 +17,11 @@ class ImageDataModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     image_id: int
-    image_url: str
+    image_path: str
     tags: Optional[Dict[str, Any]] = None
     inserted_at: datetime
     created_at: datetime
     geom_wkt: Optional[str] = None
-
 
 class DetectionModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -29,7 +29,7 @@ class DetectionModel(BaseModel):
     pass_detections_id: int
     job_id: int
     global_class_id: int
-    label:str
+    label: str
 
     confidence: Optional[float] = None
     x: float
@@ -37,7 +37,7 @@ class DetectionModel(BaseModel):
     width: float
     height: float
 
-    mask: Optional[Dict[str, Any]] = None # ou Optional[Any]
+    mask: Optional[Dict[str, Any]] = None
     created_at: datetime
     sgc_approved: bool = False
 
@@ -95,7 +95,7 @@ class PostgresRepository:
         *,
         network_name: str,
         network_version: str = "1",
-        description: Optional[str] = None,
+        description: Optional[str] = "",
     ) -> int:
         s = self._schema
 
@@ -135,7 +135,7 @@ class PostgresRepository:
                 f"""
                 SELECT
                   image_id,
-                  image_url,
+                  image_path,
                   tags,
                   inserted_at,
                   created_at,
@@ -150,7 +150,7 @@ class PostgresRepository:
 
             image = ImageDataModel(
                 image_id=int(img_row["image_id"]),
-                image_url=str(img_row["image_url"]),
+                image_path=str(img_row["image_path"]),
                 tags=img_row["tags"],
                 inserted_at=img_row["inserted_at"],
                 created_at=img_row["created_at"],
@@ -200,12 +200,14 @@ class PostgresRepository:
                 return ImageContextModel(image=image, jobs=[])
 
             job_ids = list(jobs_by_id.keys())
+
             det_rows = await conn.fetch(
                 f"""
                 SELECT
                   d.pass_detections_id,
                   d.job_id,
                   d.global_class_id,
+                  d.label,
                   d.confidence,
                   d.x,
                   d.y,
@@ -226,6 +228,7 @@ class PostgresRepository:
                     pass_detections_id=int(r["pass_detections_id"]),
                     job_id=int(r["job_id"]),
                     global_class_id=int(r["global_class_id"]),
+                    label=str(r["label"]),
                     confidence=float(r["confidence"]) if r["confidence"] is not None else None,
                     x=float(r["x"]),
                     y=float(r["y"]),
@@ -239,8 +242,6 @@ class PostgresRepository:
 
             return ImageContextModel(image=image, jobs=list(jobs_by_id.values()))
 
-
-    #todo: fazer a trasanction englobar o envio para o rabbit para dar rollback se der erro no envio do rabbit
     async def start_job(
         self,
         *,
@@ -263,7 +264,7 @@ class PostgresRepository:
                 network_id = await self._get_or_create_network_id(
                     conn,
                     network_name=network_name,
-                    network_version=network_version,
+                    network_version="1",
                 )
 
                 row = await conn.fetchrow(
@@ -282,34 +283,131 @@ class PostgresRepository:
                 if not row:
                     raise RuntimeError("Falha ao criar/obter job_id.")
                 return int(row["job_id"])
-    #todo: make this return image_id
+
     async def finish_job(
         self,
         *,
         job_id: int,
         finished_at: Optional[datetime] = None,
     ) -> int:
+        """
+        Marca job como finished e retorna o image_id associado ao job.
+        """
         s = self._schema
         finished_at = finished_at or datetime.now()
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                res = await conn.execute(
+                row = await conn.fetchrow(
                     f"""
                     UPDATE {s}.job
                     SET status = 'finished',
                         finished_at = $2
                     WHERE job_id = $1
+                    RETURNING image_id
                     """,
                     job_id,
                     finished_at,
                 )
-                if res == "UPDATE 0":
+                if not row:
                     raise LookupError(f"job_id={job_id} não existe em {s}.job")
-                return image_id
+                return int(row["image_id"])
 
-    async def create_image_data(self,*,image_url):
-        raise NotImplementedError()
+    async def create_image_data(
+            self,
+            *,
+            image_url: str,
+            tags: Optional[Dict[str, Any]] = None,
+            geom_wkt: Optional[str] = None,
+    ) -> int:
+        s = self._schema
 
-    async def insert_detection_in_final_database(self,*,detection,schema):
-        raise NotImplementedError()
+        # Garante defaults
+        tags = json.dumps(tags) if tags is not None else json.dumps({})
+        # Nota: Se o campo no banco for JSONB, o asyncpg costuma aceitar string JSON ou dict direto dependendo da config.
+        # Se der erro de tipo, passe o dict direto sem json.dumps.
+
+        # Default GEOM: Se for nulo, usa ponto 0,0.
+        # Assumindo que o banco tenha PostGIS instalado para usar ST_GeomFromText
+        geom_wkt = geom_wkt if geom_wkt is not None else "POINT(0 0)"
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                # CORREÇÃO: Adicionados $2 (tags) e conversão de geometria no INSERT
+                query = f"""
+                    INSERT INTO {s}.image_data (image_path, tags, geom)
+                    VALUES (
+                        $1, 
+                        $2, 
+                        ST_GeomFromText($3, 4326)
+                    )
+                    ON CONFLICT (image_path)
+                    DO UPDATE SET
+                        tags = EXCLUDED.tags,
+                        geom = EXCLUDED.geom
+                    RETURNING image_id
+                """
+
+                row = await conn.fetchrow(query, image_url, tags, geom_wkt)
+
+                if not row:
+                    raise RuntimeError("Falha ao criar/obter image_id.")
+                return int(row["image_id"])
+
+    async def insert_detection_in_final_database(
+        self,
+        *,
+        detection: DetectionModel,
+        schema: str,
+    ) -> int:
+        """
+        Insere detecção em {schema}.detections, idempotente pelo unique_detecion.
+        Retorna pass_detections_id.
+        """
+        s = schema
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO {s}.detections (
+                        job_id,
+                        global_class_id,
+                        label,
+                        confidence,
+                        x, y, width, height,
+                        mask,
+                        created_at,
+                        sgc_approved
+                    )
+                    VALUES (
+                        $1, $2, $3,
+                        $4,
+                        $5, $6, $7, $8,
+                        $9::jsonb,
+                        $10,
+                        $11
+                    )
+                    ON CONFLICT (job_id, global_class_id, x, y, width, height)
+                    DO UPDATE SET
+                        confidence = EXCLUDED.confidence,
+                        mask = EXCLUDED.mask,
+                        label = EXCLUDED.label,
+                        sgc_approved = EXCLUDED.sgc_approved
+                    RETURNING pass_detections_id
+                    """,
+                    int(detection.job_id),
+                    int(detection.global_class_id),
+                    str(detection.label),
+                    detection.confidence,
+                    float(detection.x),
+                    float(detection.y),
+                    float(detection.width),
+                    float(detection.height),
+                    detection.mask if detection.mask is not None else {},
+                    detection.created_at,
+                    bool(detection.sgc_approved),
+                )
+                if not row:
+                    raise RuntimeError("Falha ao inserir/atualizar detection.")
+                return int(row["pass_detections_id"])
