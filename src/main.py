@@ -59,7 +59,7 @@ from custom_logger import logger
 from src.ChannelPoolPublisher import ChannelPoolPublisher
 from src.handle_entry_message import handle_entry_message
 from src.handle_main_message import handle_main_message
-from src.ia_zeladoria_repository import ImageContextModel
+from src.postgres_repository import ImageContextModel
 
 from xml_parser import ProcessingRules, RabbitConfig
 
@@ -87,24 +87,39 @@ async def connect_to_rabbit(
         password=rabbit.rabbit_pass
     )
 
-    # 2. Canal e Fila MAIN
-    main_channel = await connection.channel()
-
-    await main_channel.set_qos(prefetch_count=rabbit.worker_concurrency)
-    main_queue: AbstractRobustQueue = await main_channel.declare_queue(
-        rabbit.rabbit_main_queue,
-        durable=True
-    )
-
-    # 3. Canal e Fila ENTRY
+    # 2. Canal e Fila ENTRY
     entry_channel = await connection.channel()
-    await entry_channel.set_qos(prefetch_count=rabbit.worker_concurrency)
+    await entry_channel.declare_queue(rabbit.rabbit_entry_dlq, durable=True)
+    await entry_channel.set_qos(prefetch_count=rabbit.rabbit_entry_prefetch_count)
     entry_queue: AbstractRobustQueue = await entry_channel.declare_queue(
         rabbit.rabbit_entry_queue,
-        durable=True
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": rabbit.rabbit_entry_dlq,
+        },
     )
 
-    publisher = ChannelPoolPublisher(connection, pool_size=10)
+    # 3. Canal e Fila MAIN
+    main_channel = await connection.channel()
+    await main_channel.declare_queue(rabbit.rabbit_main_dlq, durable=True)
+    await main_channel.set_qos(prefetch_count=rabbit.rabbit_main_prefetch_count)
+    main_queue: AbstractRobustQueue = await main_channel.declare_queue(
+        rabbit.rabbit_main_queue,
+        durable=True,
+        arguments={
+            # Usa a exchange default (sem precisar declarar exchange)
+            "x-dead-letter-exchange": "",
+            # Routing key = nome exato da fila DLQ
+            "x-dead-letter-routing-key": rabbit.rabbit_main_dlq,
+        },
+    )
+
+
+
+
+
+    publisher = ChannelPoolPublisher(connection, pool_size=rabbit.rabbit_publisher_pool_size)
     await publisher.start()
 
 
@@ -138,8 +153,8 @@ async def run_service() -> None:
             user=pg.postgres_user,
             password=pg.postgres_pass,
             database=pg.postgres_database,
-            min_size=5,
-            max_size=processing_rules.rabbit.worker_concurrency + 2
+            min_size=1,
+            max_size=processing_rules.postgres.postgres_pool_size,
         )
         logger.info(f"[BOOT] Postgres Pool created")
 
@@ -148,7 +163,7 @@ async def run_service() -> None:
         logger.info("[BOOT] HTTP Client initialized")
 
         # --- Controle de Concorrência ---
-        sem = asyncio.Semaphore(processing_rules.rabbit.worker_concurrency)
+        sem = asyncio.Semaphore(processing_rules.worker_concurrency)
 
         # --- Handlers de Sinal ---
         def _stop(*_: Any) -> None:

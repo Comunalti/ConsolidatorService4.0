@@ -8,18 +8,19 @@ from typing import Any, ClassVar, Dict, Iterator, List, Optional, Type, TypeVar,
 
 from pydantic import BaseModel, Field
 
-from ia_zeladoria_repository import (
+from postgres_repository import (
     ImageContextModel,
     ImageDataModel,
-    DetectionModel,
     JobModel,
 )
+from src.messages import YoloDetection
+
 
 # ================================================================
 # Helpers
 # ================================================================
 
-def iter_detections(ctx: ImageContextModel) -> Iterator[DetectionModel]:
+def iter_detections(ctx: ImageContextModel) -> Iterator[YoloDetection]:
     for job in ctx.jobs:
         for det in job.detections:
             yield det
@@ -71,8 +72,7 @@ class RC_NotProcessedInNetwork(RoutingCondition):
     def evaluate(self, ctx: ImageContextModel) -> bool:
         # "não processado" = não existe job daquela rede em processing|finished
         return not any(
-            j.network_name == self.network_name and j.status in ("processing", "finished")
-            for j in ctx.jobs
+            j.network_name == self.network_name and j.status in ("processing", "finished") for j in ctx.jobs
         )
 
 
@@ -100,28 +100,19 @@ class RC_RequiresDetectionOfClass(RoutingCondition):
         return cls(class_id=int(node.attrib["class_id"]))
 
     def evaluate(self, ctx: ImageContextModel) -> bool:
-        return any(det.global_class_id == self.class_id for det in iter_detections(ctx))
+        return any(det.id == self.class_id for det in iter_detections(ctx))
 
 
 @RoutingCondition.register_xml_tag("CityIsIbge")
 class RC_CityIsIbge(RoutingCondition):
-    code: int
+    code: str
 
     @classmethod
     def from_xml(cls, node: ET.Element):
-        return cls(code=int(node.attrib["code"]))
+        return cls(code=node.attrib["code"])
 
     def evaluate(self, ctx: ImageContextModel) -> bool:
-        # No schema novo, ibge_code pode estar em tags (ou você pode ter coluna dedicada no futuro).
-        # Aqui seguimos o comportamento antigo: tenta pegar do ctx.image.tags["ibge_code"].
-        if not ctx.image:
-            return False
-        if ctx.image.tags and "ibge_code" in ctx.image.tags:
-            try:
-                return int(ctx.image.tags["ibge_code"]) == self.code
-            except Exception:
-                return False
-        return False
+        return ctx.image.ibge_code == self.code
 
 
 @RoutingCondition.register_xml_tag("or")
@@ -167,7 +158,7 @@ class DetectionCondition(BaseModel):
             raise ValueError(f"DetectionCondition XML desconhecida: <{tag}>")
         return cls._registry[tag].from_xml(node)  # type: ignore
 
-    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
         raise NotImplementedError()
 
 
@@ -179,8 +170,8 @@ class DC_DetectionIs(DetectionCondition):
     def from_xml(cls, node: ET.Element):
         return cls(class_id=int(node.attrib["class_id"]))
 
-    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
-        return det.global_class_id == self.class_id
+    def evaluate(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
+        return det.id == self.class_id
 
 
 # ================================================================
@@ -213,7 +204,7 @@ class FinalDatabaseCondition(BaseModel):
             raise ValueError(f"FinalDatabaseCondition XML desconhecida: <{tag}>")
         return cls._registry[tag].from_xml(node)  # type: ignore
 
-    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
         raise NotImplementedError()
 
 
@@ -229,8 +220,8 @@ class FDB_DetectionIsNot(FinalDatabaseCondition):
     def from_xml(cls, node: ET.Element):
         return cls(class_id=int(node.attrib["class_id"]))
 
-    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
-        return det.global_class_id != self.class_id
+    def evaluate(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
+        return det.id != self.class_id
 
 
 @FinalDatabaseCondition.register_xml_tag("or")
@@ -246,7 +237,7 @@ class FDB_Or(FinalDatabaseCondition):
         sub = [FinalDatabaseCondition.from_xml_node(c) for c in node]
         return cls(conditions=sub)
 
-    def evaluate(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
+    def evaluate(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
         return any(c.evaluate(ctx, det) for c in self.conditions)
 
 
@@ -313,7 +304,7 @@ class DetectionRule(BaseModel):
 
         return cls(target_task=task, conditions=conds)
 
-    def matches(self, ctx: ImageContextModel, det: DetectionModel) -> bool:
+    def matches(self, ctx: ImageContextModel, det: YoloDetection) -> bool:
         return all(c.evaluate(ctx, det) for c in self.conditions)
 
 
@@ -322,7 +313,7 @@ class DetectionRule(BaseModel):
 # ================================================================
 
 class FinalDetectionRoute(BaseModel):
-    detection: DetectionModel
+    detection: YoloDetection
     target_tasks: List[str] = Field(default_factory=list)
 
     def get_first(self) -> Optional[str]:
@@ -347,7 +338,7 @@ class FinalDatabaseRoute(BaseModel):
     - detections: lista de detecções
     """
     Schema: str
-    detections: List[DetectionModel] = Field(default_factory=list)
+    detections: List[YoloDetection] = Field(default_factory=list)
 
 
 # ================================================================
@@ -355,13 +346,21 @@ class FinalDatabaseRoute(BaseModel):
 # ================================================================
 
 class RabbitConfig(BaseModel):
-    worker_concurrency: int
     rabbit_host: str
     rabbit_port: int
     rabbit_user: str
     rabbit_pass: str
-    rabbit_main_queue: str
+
     rabbit_entry_queue: str
+    rabbit_entry_dlq: str
+    rabbit_entry_prefetch_count: int
+
+    rabbit_main_queue: str
+    rabbit_main_dlq: str
+    rabbit_main_prefetch_count: int
+
+    rabbit_publisher_pool_size: int
+
 
 
 class PostgresConfig(BaseModel):
@@ -371,6 +370,7 @@ class PostgresConfig(BaseModel):
     postgres_pass: str
     postgres_database: str
     postgres_consolidator_schema: Optional[str] = None
+    postgres_pool_size: int
 
 
 class RoutingsConfig(BaseModel):
@@ -392,6 +392,7 @@ class ProcessingRules(BaseModel):
 
     rabbit: RabbitConfig
     postgres: PostgresConfig
+    worker_concurrency: int
 
     routings_config: RoutingsConfig
     routings: List[RoutingRule] = Field(default_factory=list)
@@ -412,6 +413,7 @@ class ProcessingRules(BaseModel):
             version=data["version"],
             rabbit=data["rabbit"],
             postgres=data["postgres"],
+            worker_concurrency=data["worker_concurrency"],
             routings_config=data["routings_config"],
             routings=data["routings"],
             sgc=data["sgc"],
@@ -444,13 +446,21 @@ class ProcessingRules(BaseModel):
         version = root.attrib.get("version")
 
         rabbit = RabbitConfig(
-            worker_concurrency=int(ProcessingRules._req_attr(root, "WORKER_CONCURRENCY")),
             rabbit_host=ProcessingRules._req_attr(root, "RABBIT_HOST"),
             rabbit_port=int(ProcessingRules._req_attr(root, "RABBIT_PORT")),
             rabbit_user=ProcessingRules._req_attr(root, "RABBIT_USER"),
             rabbit_pass=ProcessingRules._req_attr(root, "RABBIT_PASS"),
-            rabbit_main_queue=ProcessingRules._req_attr(root, "RABBIT_MAIN_QUEUE"),
+
             rabbit_entry_queue=ProcessingRules._req_attr(root, "RABBIT_ENTRY_QUEUE"),
+            rabbit_entry_dlq=ProcessingRules._req_attr(root, "RABBIT_ENTRY_DLQ"),
+            rabbit_entry_prefetch_count=int(ProcessingRules._req_attr(root, "RABBIT_ENTRY_PREFETCH_COUNT")),
+
+
+            rabbit_main_queue=ProcessingRules._req_attr(root, "RABBIT_MAIN_QUEUE"),
+            rabbit_main_dlq= ProcessingRules._req_attr(root, "RABBIT_MAIN_DLQ"),
+            rabbit_main_prefetch_count= int(ProcessingRules._req_attr(root, "RABBIT_MAIN_PREFETCH_COUNT")),
+
+            rabbit_publisher_pool_size= int(ProcessingRules._req_attr(root, "RABBIT_PUBLISHER_POOL_SIZE")),
         )
 
         postgres = PostgresConfig(
@@ -460,7 +470,10 @@ class ProcessingRules(BaseModel):
             postgres_pass=ProcessingRules._req_attr(root, "POSTGRES_PASS"),
             postgres_database=ProcessingRules._req_attr(root, "POSTGRES_DATABASE"),
             postgres_consolidator_schema=ProcessingRules._opt_attr(root, "POSTGRES_CONSOLIDATOR_SCHEMA", None),
+            postgres_pool_size=int(ProcessingRules._opt_attr(root, "POSTGRES_POOL_SIZE")),
         )
+
+        worker_concurrency = int(ProcessingRules._opt_attr(root, "WORKER_CONCURRENCY"))
 
         routings_config = RoutingsConfig(network_queue_prefix="fila_")
         routings: List[RoutingRule] = []
@@ -493,6 +506,7 @@ class ProcessingRules(BaseModel):
             "version": version,
             "rabbit": rabbit,
             "postgres": postgres,
+            "worker_concurrency": worker_concurrency,
             "routings_config": routings_config,
             "routings": routings,
             "sgc": sgc,
@@ -549,7 +563,7 @@ class ProcessingRules(BaseModel):
         if not self.final_database_detection_conditions:
             return []
 
-        candidate_detections: List[DetectionModel] = [
+        candidate_detections: List[YoloDetection] = [
             route.detection
             for route in finalDetectionsRouteMap
             if not route.target_tasks

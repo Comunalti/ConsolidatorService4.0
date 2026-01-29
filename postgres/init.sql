@@ -1,81 +1,75 @@
--- ============================================================
--- consolidator (antigo ia_zeladoria)
--- - schema: consolidator
--- - tabelas: class, network, network_class, image_data, job, detections
--- - classes globais (IDs fixos, ex: 9993, 888880)
--- - network_class guarda local_class_id (índice local do modelo)
--- - detections pertence a job (não direto a image_id)
--- - trigger garante: detections.global_class_id permitido para a network do job
--- ============================================================
-
+-- init.sql
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE SCHEMA IF NOT EXISTS consolidator;
 
+-- =========================
+-- DROP (ordem correta)
+-- =========================
+DROP TABLE IF EXISTS consolidator.detections CASCADE;
+DROP TABLE IF EXISTS consolidator.job CASCADE;
+DROP TABLE IF EXISTS consolidator.image_data CASCADE;
+
 -- ============================================================
--- Tabela de Dicionário de Classes (global)
--- Obs: sem SERIAL porque você usa IDs globais fixos
+-- IMAGE DATA (TIPADA + JETSON DETECTIONS JSONB)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.class (
-    global_class_id INTEGER PRIMARY KEY,
-    class_name      VARCHAR(150) NOT NULL,
-    description     TEXT,
-    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE consolidator.image_data (
+    -- PK interna (sua)
+    id BIGSERIAL PRIMARY KEY,
+
+    -- ID externo vindo na mensagem (não é sua PK)
+    external_image_id BIGINT NOT NULL,
+
+    -- path externo vindo na mensagem (url)
+    image_path TEXT NOT NULL,
+
+    -- tags tipadas
+    device    TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    camera_id TEXT NOT NULL,
+    ibge_code TEXT NOT NULL,
+
+    -- jetson_data tipado
+    latitude  DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    jetson_timestamp TIMESTAMP NOT NULL,
+
+    -- detections vindas da Jetson ficam aqui (raw JSON list)
+    jetson_detections JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    -- geom derivada de latitude/longitude
+    geom GEOMETRY(Point, 4326) GENERATED ALWAYS AS (
+        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+    ) STORED,
+
+    inserted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- uniques para dedupe
+    CONSTRAINT unique_external_image_id UNIQUE (external_image_id),
+    CONSTRAINT unique_image_path UNIQUE (image_path)
 );
 
--- ============================================================
--- Tabela de Redes (com version)
--- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.network (
-    network_id      BIGSERIAL PRIMARY KEY,
-    network_name    VARCHAR(150) NOT NULL,
-    network_version VARCHAR(80)  NOT NULL DEFAULT '1',
-    description     TEXT,
-    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT unique_network_name_version UNIQUE (network_name, network_version)
-);
+CREATE INDEX IF NOT EXISTS ix_image_data_geom
+  ON consolidator.image_data USING GIST (geom);
+
+CREATE INDEX IF NOT EXISTS ix_image_data_device
+  ON consolidator.image_data (device);
+
+CREATE INDEX IF NOT EXISTS ix_image_data_jetson_timestamp
+  ON consolidator.image_data (jetson_timestamp);
 
 -- ============================================================
--- Tabela de Classes e Redes
--- - Remove o serial_id (redundante)
--- - Mantém local_class_id
--- - Garante:
---   * (network_id, global_class_id) único (PK)
---   * (network_id, local_class_id) único
+-- JOB (processamento de 1 imagem por 1 "rede"/etapa)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.network_class (
-    network_id       BIGINT  NOT NULL REFERENCES consolidator.network(network_id) ON DELETE CASCADE,
-    global_class_id  INTEGER NOT NULL REFERENCES consolidator.class(global_class_id) ON DELETE RESTRICT,
-    local_class_id   INTEGER NOT NULL,
-
-    PRIMARY KEY (network_id, global_class_id),
-    CONSTRAINT unique_local_class_network UNIQUE (network_id, local_class_id)
-);
-
-CREATE INDEX IF NOT EXISTS ix_network_class_global_class_id
-  ON consolidator.network_class (global_class_id);
-
--- ============================================================
--- Tabela de Imagem
--- - image_path (renomeado)
--- - mantém tags, inserted_at, created_at, geom
--- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.image_data (
-    image_id     BIGSERIAL PRIMARY KEY,
-    image_path   TEXT NOT NULL UNIQUE,
-    tags         JSONB NOT NULL DEFAULT '{}'::jsonb,
-    inserted_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    geom         GEOMETRY NOT NULL DEFAULT ST_SetSRID(ST_MakePoint(0,0), 4326)
-);
-
--- ============================================================
--- Tabela de Jobs (processamento de 1 imagem por 1 rede)
--- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.job (
+CREATE TABLE consolidator.job (
     job_id       BIGSERIAL PRIMARY KEY,
+
     status       VARCHAR(20) NOT NULL DEFAULT 'processing', -- processing|finished
-    image_id     BIGINT NOT NULL REFERENCES consolidator.image_data(image_id) ON DELETE CASCADE,
-    network_id   BIGINT NOT NULL REFERENCES consolidator.network(network_id) ON DELETE RESTRICT,
+
+    image_pk     BIGINT NOT NULL REFERENCES consolidator.image_data(id) ON DELETE CASCADE,
+
+    network_name    TEXT NOT NULL,
+    network_version TEXT NOT NULL DEFAULT '1',
 
     created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at   TIMESTAMP,
@@ -85,99 +79,50 @@ CREATE TABLE IF NOT EXISTS consolidator.job (
     CONSTRAINT check_job_status CHECK (status IN ('processing', 'finished'))
 );
 
--- evita job duplicado pra mesma (image, network)
+-- evita job duplicado para mesma imagem/etapa
 CREATE UNIQUE INDEX IF NOT EXISTS unique_job_image_network
-  ON consolidator.job (image_id, network_id);
+  ON consolidator.job (image_pk, network_name, network_version);
 
 CREATE INDEX IF NOT EXISTS ix_job_status
   ON consolidator.job (status);
 
 CREATE INDEX IF NOT EXISTS ix_job_network_created_at
-  ON consolidator.job (network_id, created_at);
+  ON consolidator.job (network_name, created_at);
 
 -- ============================================================
--- Tabela de Detecções pela Rede (agora por job)
--- - Mantém: confidence, x,y,width,height, mask, created_at, sgc_approved
--- - Remove redundância: image_id não fica aqui (vem via job)
+-- DETECTIONS (por job) - ALINHADO AO YoloDetection
+-- - detection_id é PK do banco
+-- - job_id é FK
+-- - campos com os mesmos nomes do Pydantic:
+--   label, id, confidence, x, y, width, height, image_shape, mask
 -- ============================================================
-CREATE TABLE IF NOT EXISTS consolidator.detections (
-    pass_detections_id BIGSERIAL PRIMARY KEY,
+CREATE TABLE consolidator.detections (
+    detection_id BIGSERIAL PRIMARY KEY,
 
-    job_id          BIGINT  NOT NULL REFERENCES consolidator.job(job_id) ON DELETE CASCADE,
-    global_class_id INTEGER NOT NULL REFERENCES consolidator.class(global_class_id) ON DELETE RESTRICT,
+    job_id BIGINT NOT NULL REFERENCES consolidator.job(job_id) ON DELETE CASCADE,
 
-    label       TEXT NOT NULL DEFAULT '',
+    label      TEXT NOT NULL,
+    id         INTEGER NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL,
 
-    confidence  NUMERIC(10,6),
-    x           NUMERIC(10,6) NOT NULL,
-    y           NUMERIC(10,6) NOT NULL,
-    width       NUMERIC(10,6) NOT NULL,
-    height      NUMERIC(10,6) NOT NULL,
+    x      DOUBLE PRECISION NOT NULL,
+    y      DOUBLE PRECISION NOT NULL,
+    width  DOUBLE PRECISION NOT NULL,
+    height DOUBLE PRECISION NOT NULL,
 
-    mask        JSONB,
-    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    sgc_approved BOOLEAN NOT NULL DEFAULT FALSE,
-
-    CONSTRAINT unique_detecion UNIQUE (job_id, global_class_id, x, y, width, height)
+    image_shape INTEGER[] NOT NULL,
+    mask        JSONB NOT NULL DEFAULT '[]'::jsonb
 );
 
+ALTER TABLE consolidator.detections
+  ADD CONSTRAINT check_image_shape_len
+  CHECK (array_length(image_shape, 1) = 2);
 
 CREATE INDEX IF NOT EXISTS ix_detections_job_id
   ON consolidator.detections (job_id);
 
-CREATE INDEX IF NOT EXISTS ix_detections_global_class_id
-  ON consolidator.detections (global_class_id);
-
--- ============================================================
--- TRIGGER: valida se a classe da detecção é permitida para a network do job
--- ============================================================
-CREATE OR REPLACE FUNCTION consolidator.trg_validate_detection_class_for_job_network()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  v_network_id BIGINT;
-BEGIN
-  -- Busca a network do job (usando o schema consolidator)
-  SELECT j.network_id
-    INTO v_network_id
-    FROM consolidator.job j
-   WHERE j.job_id = NEW.job_id;
-
-  IF v_network_id IS NULL THEN
-    RAISE EXCEPTION 'Job % não existe', NEW.job_id
-      USING ERRCODE = '23503';
-  END IF;
-
-  -- Verifica se a classe global é mapeada para essa network
-  IF NOT EXISTS (
-    SELECT 1
-      FROM consolidator.network_class nc
-     WHERE nc.network_id = v_network_id
-       AND nc.global_class_id = NEW.global_class_id
-  ) THEN
-    RAISE EXCEPTION
-      'global_class_id % não é permitido para network_id % (job_id %)',
-      NEW.global_class_id, v_network_id, NEW.job_id
-      USING ERRCODE = '23514';
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS detections_validate_class_for_job_network ON consolidator.detections;
-
-CREATE TRIGGER detections_validate_class_for_job_network
-BEFORE INSERT OR UPDATE OF job_id, global_class_id
-ON consolidator.detections
-FOR EACH ROW
-EXECUTE FUNCTION consolidator.trg_validate_detection_class_for_job_network();
-
-
-
-
-
+CREATE INDEX IF NOT EXISTS ix_detections_id
+  ON consolidator.detections (id);
 
 
 

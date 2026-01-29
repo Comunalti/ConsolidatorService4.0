@@ -1,0 +1,12 @@
+{
+  "image_path": "http://10.15.150.83:9000/images/dev/2025/08/JETSON_000007_cam0-20250817-13h43m29s.jpg",
+  "image_id": "697a8aa21d14de53ccbe81ce",
+  "image_status": "created",
+  "pool_status": "added to pool",
+  "inserted_annotations": [
+    {
+      "detection_id": 23,
+      "annotation_id": "697a8aa21d14de53ccbe81cf"
+    }
+  ]
+}

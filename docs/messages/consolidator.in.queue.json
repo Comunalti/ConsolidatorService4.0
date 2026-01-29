@@ -1,0 +1,23 @@
+{
+    "image_id": 796,
+    "tags": {
+        "device": "JETSON",
+        "device_id": "000007",
+        "camera_id": "cam0",
+        "ibge_code": "4106902"
+    },
+    "image_path": "http://10.15.150.83:9000/images/dev/2025/08/JETSON_000007_cam0-20250817-13h43m29s.jpg",
+    "jetson_data": {
+        "latitude": -25.5316771,
+        "longitude": -49.2420608,
+        "timestamp": "2025-08-17 13:43:29",
+        "detections": [
+            {
+                "class_id": 26,
+                "shape_type": "bounding_box",
+                "shape": "0.277734,0.884896,0.199219,0.084375",
+                "confidence": 0.400292
+            }
+        ]
+    }
+}

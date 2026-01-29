@@ -55,11 +55,9 @@ class RabbitMessageModel(BaseModel):
             # Erro de parse (JSON quebrado)
             raise ValueError(f"Corpo da mensagem não é um JSON válido: {e}") from e
 
+class YoloDetection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-# ==============================================================================
-# Modelos de Dados
-# ==============================================================================
-class DetectionResult(BaseModel):
     label: str
     id: int
     confidence: float
@@ -69,28 +67,74 @@ class DetectionResult(BaseModel):
     width: float
     height: float
 
-    x_min: int
-    y_min: int
-    x_max: int
-    y_max: int
+    image_shape: List[int] = Field(min_length=2, max_length=2)
+    mask: Optional[List[Any]] = None
+# # ==============================================================================
+# # Modelos de Dados
+# # ==============================================================================
+# class DetectionResult(BaseModel):
+#     label: str
+#     id: int
+#     confidence: float
+#
+#     x: float
+#     y: float
+#     width: float
+#     height: float
+#
+#     x_min: int
+#     y_min: int
+#     x_max: int
+#     y_max: int
+#
+#     image_shape: List[int]  # [W, H]
+#     mask: Optional[Dict[str, Any]] = None
 
-    image_shape: List[int]  # [W, H]
-    mask: Optional[Dict[str, Any]] = None
 
 
+class DetectionEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    class_id: int
+    shape_type: str
+    shape: str
+    confidence: float
 
 
-# ==============================================================================
-# As 3 Mensagens Solicitadas
-# ==============================================================================
+class JetsonData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    latitude: float
+    longitude: float
+    timestamp: datetime
+    detections: List[DetectionEntry]
+
+
+class ImageTags(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device: str
+    device_id: str
+    camera_id: str
+    ibge_code: str
+
+
+# ============================================================
+# Mensagem principal
+# ============================================================
 
 class ConsolidatorEntryMessage(RabbitMessageModel):
     """
-    Mensagem de entrada inicial.
-    Conteúdo: apenas image_url.
-    """
-    image_url: str
+    Mensagem de entrada inicial do Consolidator.
 
+    Representa exatamente o JSON recebido da Jetson / Entry Point.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    image_id: int
+    image_path: str
+    tags: ImageTags
+    jetson_data: JetsonData
 
 class YoloInMessage(RabbitMessageModel):
     """
@@ -106,5 +150,5 @@ class YoloOutMessage(RabbitMessageModel):
     """
     job_id: int
     started_at: datetime
-    processed_at: datetime
-    detections: List[DetectionResult] = Field(default_factory=list)
+    finished_at: datetime
+    detections: List[YoloDetection] = Field(default_factory=list)

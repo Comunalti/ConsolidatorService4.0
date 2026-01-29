@@ -3,14 +3,20 @@
 <ProcessingRules
         version="1.0"
 
-        WORKER_CONCURRENCY="20"
         RABBIT_HOST="localhost"
         RABBIT_PORT="5672"
         RABBIT_USER="guest"
         RABBIT_PASS="guest"
 
-        RABBIT_MAIN_QUEUE="yolo.out.queue"
-        RABBIT_ENTRY_QUEUE="consolidator.in.queue"
+        RABBIT_ENTRY_QUEUE="consolidator.entry.queue"
+        RABBIT_ENTRY_DLQ="consolidator.entry.dlq"
+        RABBIT_ENTRY_PREFETCH_COUNT="1"
+
+        RABBIT_MAIN_QUEUE="consolidator.main.queue"
+        RABBIT_MAIN_DLQ="consolidator.main.dlq"
+        RABBIT_MAIN_PREFETCH_COUNT="1"
+
+        RABBIT_PUBLISHER_POOL_SIZE="1"
 
 
         POSTGRES_HOST="localhost"
@@ -18,8 +24,13 @@
         POSTGRES_USER="local_admin"
         POSTGRES_PASS="local_test"
         POSTGRES_DATABASE="postgres"
+        POSTGRES_POOL_SIZE="1"
 
         POSTGRES_CONSOLIDATOR_SCHEMA="consolidator"
+
+
+        WORKER_CONCURRENCY="1"
+
 >
 
   <routings
@@ -105,21 +116,21 @@
   <DetectionsRules SGC_API_URL="http://10.15.12.55:8880/send_detection_to_task" SGC_HTTP_TIMEOUT_S="30">
 
     <!-- Deteções com class_id = 2 -->
-    <DetectionRule target_task="TesteConsolidator">
+    <DetectionRule target_task="segmentacao_teste">
       <conditions>
-        <DetectionIs class_id="2"/>
+        <DetectionIs class_id="23"/>
       </conditions>
     </DetectionRule>
 
     <!-- Deteções com class_id = 7 -->
-    <DetectionRule target_task="TesteConsolidator">
+    <DetectionRule target_task="segmentacao_teste">
       <conditions>
         <DetectionIs class_id="7"/>
       </conditions>
     </DetectionRule>
 
     <!-- Deteções com class_id = 9 -->
-    <DetectionRule target_task="TesteConsolidator">
+    <DetectionRule target_task="segmentacao_teste">
       <conditions>
         <DetectionIs class_id="9"/>
       </conditions>
@@ -143,7 +154,8 @@
       <DetectionIsNot class_id="888883"/>
       <DetectionIsNot class_id="888884"/>
       <DetectionIsNot class_id="888885"/>
-      
+      <DetectionIsNot class_id="25"/>
+
     </FinalDatabaseDetectionConditions>
   </FinalDatabaseRules>
 

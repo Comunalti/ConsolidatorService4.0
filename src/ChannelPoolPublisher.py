@@ -1,21 +1,30 @@
 import asyncio
 import logging
 import aio_pika
-from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel, AbstractRobustExchange
+from aio_pika.abc import (
+    AbstractRobustConnection,
+    AbstractRobustChannel,
+    AbstractRobustExchange,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class ChannelPoolPublisher:
     """
-    Publisher com Pool, Retry Automático e Garantia de Fila (Lazy Declaration).
+    Publisher com Pool, Retry Automático e (opcional) Garantia de Fila (Lazy Declaration).
+
+    ensure_queue:
+      - True  -> olha cache; se não existe no cache, declara a fila (durable=True)
+      - False -> não verifica nem declara fila; apenas publica
     """
 
     def __init__(
-            self,
-            connection: AbstractRobustConnection,
-            pool_size: int = 10,
-            max_retries: int = 3,
+        self,
+        connection: AbstractRobustConnection,
+        pool_size: int = 10,
+        max_retries: int = 3,
+        ensure_queue: bool = True,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("pool_size deve ser > 0")
@@ -25,12 +34,13 @@ class ChannelPoolPublisher:
         self._connection = connection
         self._pool_size = pool_size
         self._max_retries = max_retries
+        self._ensure_queue = ensure_queue
 
-        self._pool: asyncio.Queue[tuple[AbstractRobustChannel, AbstractRobustExchange]] = asyncio.Queue(
-            maxsize=pool_size)
+        self._pool: asyncio.Queue[
+            tuple[AbstractRobustChannel, AbstractRobustExchange]
+        ] = asyncio.Queue(maxsize=pool_size)
 
-        # Cache para saber quais filas já garantimos a existência
-        # Isso evita chamar declare_queue toda vez (o que seria lento)
+        # Cache para filas já declaradas (por processo)
         self._declared_queues: set[str] = set()
 
         self._closed = False
@@ -46,13 +56,19 @@ class ChannelPoolPublisher:
         """Inicializa o pool."""
         if self._pool.qsize() > 0:
             return
-        logger.info(f"Inicializando Publisher (size={self._pool_size})...")
+
+        logger.info(
+            f"Inicializando Publisher "
+            f"(size={self._pool_size}, ensure_queue={self._ensure_queue})..."
+        )
+
         for _ in range(self._pool_size):
             await self._create_and_push_channel()
 
     async def close(self) -> None:
         self._closed = True
         logger.info("Fechando Publisher...")
+
         while not self._pool.empty():
             try:
                 ch, _ = self._pool.get_nowait()
@@ -64,6 +80,7 @@ class ChannelPoolPublisher:
     async def _create_and_push_channel(self) -> None:
         if self._closed:
             return
+
         try:
             ch = await self._connection.channel()
             self._pool.put_nowait((ch, ch.default_exchange))
@@ -72,25 +89,24 @@ class ChannelPoolPublisher:
             raise
 
     async def publish(
-            self,
-            queue_name: str,
-            message: aio_pika.Message,
-            *,
-            timeout: int = 10
+        self,
+        queue_name: str,
+        message: aio_pika.Message,
+        *,
+        timeout: int = 10,
     ) -> None:
         """
-        Publica garantindo que a fila existe (cria se necessário).
+        Publica na default exchange usando routing_key=queue_name.
         """
         if self._closed:
             raise RuntimeError("Publisher fechado.")
 
         attempt = 0
-        last_error = None
+        last_error: Exception | None = None
 
         while attempt <= self._max_retries:
             attempt += 1
 
-            # 1. Pega canal
             channel, exchange = await self._pool.get()
             return_channel_to_pool = True
 
@@ -103,27 +119,23 @@ class ChannelPoolPublisher:
                     continue
 
                 # =========================================================
-                # GARANTIA DE EXISTÊNCIA DA FILA (LAZY DECLARATION)
+                # (OPCIONAL) GARANTIA DE EXISTÊNCIA DA FILA
                 # =========================================================
-                # Só declaramos se ainda não conhecemos essa fila neste processo
-                if queue_name not in self._declared_queues:
-                    # durable=True é o padrão mais seguro (fila sobrevive restart do Rabbit)
+                if self._ensure_queue and queue_name not in self._declared_queues:
                     await channel.declare_queue(queue_name, durable=True)
                     self._declared_queues.add(queue_name)
-                    # logger.debug(f"Fila '{queue_name}' declarada/verificada com sucesso.")
 
-                # 2. Publica
-                await exchange.publish(message, routing_key=queue_name, timeout=timeout)
+                await exchange.publish(
+                    message,
+                    routing_key=queue_name,
+                    timeout=timeout,
+                )
                 return
 
             except aio_pika.exceptions.AMQPError as e:
                 last_error = e
                 return_channel_to_pool = False
                 logger.error(f"[Try {attempt}] Erro AMQP: {e}")
-
-                # Se deu erro no canal, pode ser que a declaração falhou ou o envio falhou.
-                # Se for erro de declaração (ex: PRECONDITION_FAILED - parametros diferentes),
-                # o retry não vai resolver, mas o log vai mostrar o motivo.
 
                 try:
                     await self._create_and_push_channel()
@@ -132,11 +144,13 @@ class ChannelPoolPublisher:
 
             except Exception as e:
                 logger.error(f"Erro genérico no publish: {e}")
-                raise e
+                raise
 
             finally:
                 if return_channel_to_pool:
                     self._pool.put_nowait((channel, exchange))
 
         raise RuntimeError(
-            f"Falha ao publicar em '{queue_name}' após {self._max_retries + 1} tentativas. Erro: {last_error}")
+            f"Falha ao publicar em '{queue_name}' após {self._max_retries + 1} tentativas. "
+            f"Erro: {last_error}"
+        )
